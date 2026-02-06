@@ -2,8 +2,8 @@
 FROM python:3.11-slim-bookworm
 
 # Set environment variables
-ENV NODE_ENV=production
 ENV PYTHONUNBUFFERED=1
+ENV FLASK_ENV=production
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
@@ -17,10 +17,6 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js 18
-RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
-    && apt-get install -y nodejs
-
 # Set working directory
 WORKDIR /app
 
@@ -31,26 +27,18 @@ COPY models/ ./models/
 COPY backend/requirements.txt ./backend/
 RUN pip install --no-cache-dir -r backend/requirements.txt
 
-# Copy Node.js package files and install
-COPY backend/package.json backend/package-lock.json ./backend/
-WORKDIR /app/backend
-RUN npm ci --only=production
-
 # Copy the rest of the backend code
 COPY backend/ ./
 
 # Create necessary directories
 RUN mkdir -p answers professional_reports sessions local-uploads videos
 
-# Set Python path for the application
-ENV PYTHON_PATH=/usr/local/bin/python
-
 # Expose the port
 EXPOSE 5000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:5000/test || exit 1
+    CMD curl -f http://localhost:5000/api/health || exit 1
 
 # Start the application
-CMD ["node", "server.js"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--threads", "4", "app:app"]
