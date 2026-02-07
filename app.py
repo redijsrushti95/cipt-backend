@@ -344,40 +344,68 @@ def get_reports():
 
 @app.route('/api/analyze/generate-report', methods=['POST'])
 def generate_report():
-    """Generate a PDF report for the current user"""
+    """Generate an average PDF report for all user answers"""
     if 'username' not in session:
         return jsonify({"error": "Not authenticated"}), 401
 
-    data = request.json
-    video_path = data.get('video_path')
-    user_name = session.get('username', 'Unknown')
+    username = session['username']
 
-    if not video_path:
-        return jsonify({"error": "Video path is required"}), 400
+    # Get all videos for this user
+    if username not in user_videos or not user_videos[username]:
+        return jsonify({"error": "No videos found for analysis"}), 404
+
+    user_videos_list = user_videos[username]
 
     try:
         # Import the analysis module
         import sys
-        sys.path.append('.')
-        from integrated_analysis_report import EnhancedProfessionalVideoAnalyzer, EnhancedProfessionalReportGenerator
+        sys.path.append('..')
+        from advanced_report import EnhancedProfessionalVideoAnalyzer, EnhancedProfessionalReportGenerator
 
-        # Run analysis
-        analyzer = EnhancedProfessionalVideoAnalyzer(video_path)
-        results = analyzer.analyze_all()
+        all_results = []
+        total_videos = len(user_videos_list)
 
-        # Generate PDF report
+        print(f"Analyzing {total_videos} videos for user {username}")
+
+        # Analyze each video
+        for i, video_info in enumerate(user_videos_list):
+            try:
+                video_path = video_info['localPath']
+                print(f"Analyzing video {i+1}/{total_videos}: {video_path}")
+
+                if not Path(video_path).exists():
+                    print(f"Video file not found: {video_path}")
+                    continue
+
+                analyzer = EnhancedProfessionalVideoAnalyzer(video_path)
+                results = analyzer.analyze_all()
+                all_results.append(results)
+
+            except Exception as e:
+                print(f"Error analyzing video {video_info['filename']}: {str(e)}")
+                continue
+
+        if not all_results:
+            return jsonify({"error": "No videos could be analyzed"}), 500
+
+        # Calculate averages across all videos
+        averaged_results = calculate_average_results(all_results)
+
+        # Generate PDF report with averaged data
         user_info = {
-            'name': user_name,
-            'role': 'Interview Candidate'
+            'name': username,
+            'role': 'Interview Candidate',
+            'total_videos_analyzed': len(all_results),
+            'analysis_type': 'Average Performance Report'
         }
 
-        generator = EnhancedProfessionalReportGenerator(results, user_info)
+        generator = EnhancedProfessionalReportGenerator(averaged_results, user_info)
         pdf_path = generator.generate_report()
 
         if pdf_path:
             # Return the report info
             report_info = {
-                "name": Path(pdf_path).stem.replace('_', ' '),
+                "name": f"{username}_Average_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
                 "url": f"/reports/{Path(pdf_path).name}",
                 "createdAt": int(datetime.now().timestamp() * 1000)
             }
@@ -387,7 +415,68 @@ def generate_report():
 
     except Exception as e:
         print(f"Report generation error: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": f"Report generation failed: {str(e)}"}), 500
+
+def calculate_average_results(all_results):
+    """Calculate average results across multiple video analyses"""
+    if not all_results:
+        return {}
+
+    # Initialize averages
+    averaged = {
+        'posture': {'total_score': 0, 'count': 0, 'analysis_type': 'Average Analysis'},
+        'facial': {'total_score': 0, 'count': 0, 'analysis_type': 'Average Analysis'},
+        'eye_contact': {'total_score': 0, 'count': 0, 'analysis_type': 'Average Analysis'},
+        'voice': {'total_score': 0, 'count': 0, 'analysis_type': 'Average Analysis'},
+        'overall': {'total_score': 0, 'count': 0}
+    }
+
+    # Aggregate scores
+    for result in all_results:
+        if 'posture' in result and result['posture'].get('score'):
+            averaged['posture']['total_score'] += result['posture']['score']
+            averaged['posture']['count'] += 1
+
+        if 'facial' in result and result['facial'].get('score'):
+            averaged['facial']['total_score'] += result['facial']['score']
+            averaged['facial']['count'] += 1
+
+        if 'eye_contact' in result and result['eye_contact'].get('score'):
+            averaged['eye_contact']['total_score'] += result['eye_contact']['score']
+            averaged['eye_contact']['count'] += 1
+
+        if 'voice' in result and result['voice'].get('score'):
+            averaged['voice']['total_score'] += result['voice']['score']
+            averaged['voice']['count'] += 1
+
+        if 'overall' in result and result['overall'].get('score'):
+            averaged['overall']['total_score'] += result['overall']['score']
+            averaged['overall']['count'] += 1
+
+    # Calculate averages
+    for category in averaged:
+        if averaged[category]['count'] > 0:
+            averaged[category]['score'] = round(averaged[category]['total_score'] / averaged[category]['count'], 1)
+        else:
+            averaged[category]['score'] = 0
+
+    # Add summary information
+    averaged['summary'] = {
+        'videos_analyzed': len(all_results),
+        'average_overall_score': averaged['overall']['score'],
+        'best_category': max(
+            [('Posture', averaged['posture']['score']),
+             ('Facial Expression', averaged['facial']['score']),
+             ('Eye Contact', averaged['eye_contact']['score']),
+             ('Voice', averaged['voice']['score'])],
+            key=lambda x: x[1]
+        )[0] if any([averaged['posture']['score'], averaged['facial']['score'],
+                    averaged['eye_contact']['score'], averaged['voice']['score']]) else 'N/A'
+    }
+
+    return averaged
 
 @app.route('/reports/<filename>', methods=['GET'])
 def serve_report(filename):
