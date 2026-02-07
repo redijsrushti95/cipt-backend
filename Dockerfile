@@ -1,5 +1,5 @@
-# Use Python 3.11 as base image (matches local dev environment)
-FROM python:3.11-slim-bookworm
+# Use Python 3.10 as base image for package compatibility
+FROM python:3.10-slim-bookworm
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
