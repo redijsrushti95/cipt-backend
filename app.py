@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, session
 from flask_cors import CORS
 import cv2
 import mediapipe as mp
@@ -9,8 +9,14 @@ import io
 from PIL import Image
 import threading
 import queue
+import os
+import json
+from datetime import datetime
+from pathlib import Path
+import uuid
 
 app = Flask(__name__)
+app.secret_key = 'your-secret-key-here-change-in-production'  # Change this in production
 #CORS(app)  # Enable CORS for React frontend
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
@@ -209,7 +215,13 @@ def login():
     username = data.get("username")
     password = data.get("password")
 
-    return jsonify({"success": True})
+  # For now, accept any login (in production, validate against database)
+    if username and password:
+        session['username'] = username
+        session['logged_in'] = True
+        return jsonify({"success": True, "username": username})
+    else:
+        return jsonify({"success": False, "error": "Invalid credentials"}), 401
 
 @app.route("/register", methods=["POST", "OPTIONS"])
 def register():
@@ -223,8 +235,21 @@ def register():
     password = data.get("password")
     email = data.get("email")
 
-    # --- your existing DB insert logic here ---
-    # Example success response:
+    # For now, accept any registration (in production, save to database)
+    if username and password:
+        session['username'] = username
+        session['logged_in'] = True
+        # --- your existing DB insert logic here ---
+        return jsonify({"success": True, "username": username})
+    else:
+        return jsonify({"success": False, "error": "Registration failed"}), 400
+
+@app.route("/logout", methods=["POST", "OPTIONS"])
+def logout():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"}), 200
+
+    session.clear()
     return jsonify({"success": True})
 
 
@@ -272,9 +297,210 @@ def analyze_voice():
         "success": True
     })
 
+# ------------------ Report Management ------------------
+REPORTS_DIR = Path("professional_reports")
+REPORTS_DIR.mkdir(exist_ok=True)
+
+def get_user_reports(username):
+    """Get all PDF reports for a specific user"""
+    user_reports = []
+    if not REPORTS_DIR.exists():
+        return user_reports
+
+    # Look for PDF files that contain the username
+    for pdf_file in REPORTS_DIR.glob("*.pdf"):
+        if username.lower() in pdf_file.name.lower():
+            # Extract timestamp from filename or use file modification time
+            try:
+                # Try to parse timestamp from filename (format: Name_Report_YYYYMMDD_HHMMSS.pdf)
+                parts = pdf_file.stem.split('_')
+                if len(parts) >= 3:
+                    timestamp_str = f"{parts[-2]}_{parts[-1]}"
+                    timestamp = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S")
+                else:
+                    timestamp = datetime.fromtimestamp(pdf_file.stat().st_mtime)
+            except:
+                timestamp = datetime.fromtimestamp(pdf_file.stat().st_mtime)
+
+            user_reports.append({
+                "name": pdf_file.stem.replace('_', ' '),
+                "url": f"/reports/{pdf_file.name}",
+                "createdAt": int(timestamp.timestamp() * 1000)  # milliseconds
+            })
+
+    # Sort by creation time (newest first)
+    user_reports.sort(key=lambda x: x["createdAt"], reverse=True)
+    return user_reports
+
+@app.route('/api/reports', methods=['GET'])
+def get_reports():
+    """Get all reports for the current user"""
+    if 'username' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    username = session['username']
+    reports = get_user_reports(username)
+    return jsonify(reports)
+
+@app.route('/api/analyze/generate-report', methods=['POST'])
+def generate_report():
+    """Generate a PDF report for the current user"""
+    if 'username' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    data = request.json
+    video_path = data.get('video_path')
+    user_name = session.get('username', 'Unknown')
+
+    if not video_path:
+        return jsonify({"error": "Video path is required"}), 400
+
+    try:
+        # Import the analysis module
+        import sys
+        sys.path.append('.')
+        from integrated_analysis_report import EnhancedProfessionalVideoAnalyzer, EnhancedProfessionalReportGenerator
+
+        # Run analysis
+        analyzer = EnhancedProfessionalVideoAnalyzer(video_path)
+        results = analyzer.analyze_all()
+
+        # Generate PDF report
+        user_info = {
+            'name': user_name,
+            'role': 'Interview Candidate'
+        }
+
+        generator = EnhancedProfessionalReportGenerator(results, user_info)
+        pdf_path = generator.generate_report()
+
+        if pdf_path:
+            # Return the report info
+            report_info = {
+                "name": Path(pdf_path).stem.replace('_', ' '),
+                "url": f"/reports/{Path(pdf_path).name}",
+                "createdAt": int(datetime.now().timestamp() * 1000)
+            }
+            return jsonify({"success": True, "report": report_info})
+        else:
+            return jsonify({"error": "Failed to generate report"}), 500
+
+    except Exception as e:
+        print(f"Report generation error: {str(e)}")
+        return jsonify({"error": f"Report generation failed: {str(e)}"}), 500
+
+@app.route('/reports/<filename>', methods=['GET'])
+def serve_report(filename):
+    """Serve PDF reports"""
+    if 'username' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    username = session['username']
+    file_path = REPORTS_DIR / filename
+
+    # Security check: ensure the file belongs to the current user
+    if not file_path.exists() or username.lower() not in filename.lower():
+        return jsonify({"error": "Report not found"}), 404
+
+    from flask import send_file
+    return send_file(file_path, as_attachment=False, mimetype='application/pdf')
+
+# ------------------ Video Upload and Management ------------------
+ANSWERS_DIR = Path("answers")
+ANSWERS_DIR.mkdir(exist_ok=True)
+
+# Store user video sessions (in production, use database)
+user_videos = {}
+
+@app.route('/upload-answer', methods=['POST'])
+def upload_answer():
+    """Upload user answer video"""
+    if 'username' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    username = session['username']
+
+    if 'video' not in request.files:
+        return jsonify({"error": "No video file provided"}), 400
+
+    video_file = request.files['video']
+    question = request.form.get('question', 'unknown')
+    domain = request.form.get('domain', 'unknown')
+
+    if video_file.filename == '':
+        return jsonify({"error": "No video file selected"}), 400
+
+    # Generate unique filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    unique_id = str(uuid.uuid4())[:8]
+    filename = f"{username}_{domain}_q{question}_{timestamp}_{unique_id}.webm"
+    file_path = ANSWERS_DIR / filename
+
+    try:
+        video_file.save(str(file_path))
+
+        # Store video info for this user
+        if username not in user_videos:
+            user_videos[username] = []
+
+        video_info = {
+            'filename': filename,
+            'localPath': str(file_path),
+            'question': question,
+            'domain': domain,
+            'timestamp': timestamp,
+            'username': username
+        }
+
+        user_videos[username].append(video_info)
+
+        # Keep only the latest 10 videos per user
+        if len(user_videos[username]) > 10:
+            user_videos[username] = user_videos[username][-10:]
+
+        return jsonify({
+            "success": True,
+            "message": "Video uploaded successfully",
+            "filename": filename,
+            "path": str(file_path)
+        })
+
+    except Exception as e:
+        return jsonify({"error": f"Upload failed: {str(e)}"}), 500
+
+@app.route('/api/get-latest-video', methods=['GET'])
+def get_latest_video():
+    """Get the latest uploaded video for the current user"""
+    if 'username' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+
+    username = session['username']
+
+    if username not in user_videos or not user_videos[username]:
+        return jsonify({"error": "No videos found"}), 404
+
+    # Get the most recent video
+    latest_video = max(user_videos[username], key=lambda x: x['timestamp'])
+
+    return jsonify(latest_video)
+
+@app.route('/videos/<path:filename>', methods=['GET'])
+def serve_video(filename):
+    """Serve video files"""
+    from flask import send_file
+    video_path = Path("backend/videos") / filename
+    if not video_path.exists():
+        video_path = Path("videos") / filename
+
+    if not video_path.exists():
+        return jsonify({"error": "Video not found"}), 404
+
+    return send_file(str(video_path), mimetype='video/mp4')
+
 @app.route('/api/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "healthy", "message": "Python backend is running"})
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000, host='0.0.0.0')
+    port = int(os.environ.get('PORT', 5000))
+    app.run(debug=False, host='0.0.0.0', port=port)
