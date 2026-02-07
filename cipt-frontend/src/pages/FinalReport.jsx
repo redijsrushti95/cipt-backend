@@ -48,13 +48,13 @@ const FinalReport = () => {
                 console.log("Starting report generation...");
 
                 // 2. Trigger analysis with found video
-                const response = await fetch(`${API_BASE_URL}/analyze/generate-report`, {
+                const response = await fetch(`${API_BASE_URL}/api/analyze/generate-report`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     credentials: 'include',
                     body: JSON.stringify({
-                        videoPath: videoData.localPath,
-                        candidateName: videoData.username || "Candidate",
+                        video_path: videoData.localPath,
+                        user_name: videoData.username || "Candidate",
                         role: videoData.domain || "Applicant"
                     }),
                 });
